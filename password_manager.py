@@ -26,6 +26,9 @@ DB_PATH = BASE_DIR / "vault.db"
 KEY_PATH = BASE_DIR / ".key"
 
 DEFAULT_LENGTH = 16
+MIN_LENGTH = 8
+MAX_LENGTH = 64
+SPECIAL_CHARS = "!@#$%^&*"
 SALT_SIZE = 16
 
 
@@ -229,10 +232,10 @@ class PasswordGenerator:
     """
 
     GROUPS = {
-        "lowercase": string.ascii_lowercase,
         "uppercase": string.ascii_uppercase,
+        "lowercase": string.ascii_lowercase,
         "digits": string.digits,
-        "special": string.punctuation,
+        "special": SPECIAL_CHARS,
     }
 
     def __init__(
@@ -255,9 +258,9 @@ class PasswordGenerator:
         pools = [pool for name, pool in self.GROUPS.items() if self.enabled[name]]
         if not pools:
             raise ValueError("Нужно выбрать хотя бы один набор символов")
-        if self.length < len(pools):
+        if not MIN_LENGTH <= self.length <= MAX_LENGTH:
             raise ValueError(
-                f"Длина ({self.length}) меньше числа выбранных наборов ({len(pools)})"
+                f"Длина пароля должна быть от {MIN_LENGTH} до {MAX_LENGTH} символов"
             )
 
         alphabet = "".join(pools)
@@ -269,7 +272,7 @@ class PasswordGenerator:
 
 
 # ---------------------------------------------------------------------------
-# Класс PasswordManager — interacting с пользователем (CLI и меню)
+# Класс PasswordManager — взаимодействие с пользователем (CLI и меню)
 # ---------------------------------------------------------------------------
 
 class PasswordManager:
@@ -299,6 +302,70 @@ class PasswordManager:
                 print("Пароли не совпадают.", file=sys.stderr)
                 continue
             return password
+
+    @staticmethod
+    def _is_yes(answer: str, default: bool = False) -> bool:
+        answer = answer.strip().lower()
+        if answer in ("да", "yes", "y", "д"):
+            return True
+        if answer in ("нет", "no", "n"):
+            return False
+        return default
+
+    def _ask_password_generator(self) -> PasswordGenerator:
+        """Спросить длину и наборы символов, вернуть настроенный генератор."""
+        while True:
+            raw_length = self._input(
+                f"Длина пароля ({MIN_LENGTH}-{MAX_LENGTH}, по умолчанию {DEFAULT_LENGTH}): "
+            )
+            if not raw_length:
+                length = DEFAULT_LENGTH
+                break
+            try:
+                length = int(raw_length)
+            except ValueError:
+                print("Длина должна быть числом.", file=sys.stderr)
+                continue
+            if not MIN_LENGTH <= length <= MAX_LENGTH:
+                print(
+                    f"Длина должна быть от {MIN_LENGTH} до {MAX_LENGTH} символов.",
+                    file=sys.stderr,
+                )
+                continue
+            break
+
+        labels = (
+            ("uppercase", "Заглавные буквы (A-Z)"),
+            ("lowercase", "Строчные буквы (a-z)"),
+            ("digits", "Цифры (0-9)"),
+            ("special", "Специальные символы (!@#$%^&*)"),
+        )
+        while True:
+            settings = {
+                key: self._is_yes(
+                    self._input(f"{label}? [да/нет, по умолчанию да]: "), default=True
+                )
+                for key, label in labels
+            }
+            if any(settings.values()):
+                break
+            print("Нужно выбрать хотя бы один тип символов.", file=sys.stderr)
+
+        return PasswordGenerator(length=length, **settings)
+
+    def _offer_copy(self, password: str) -> None:
+        """Предложить скопировать показанный пароль в буфер обмена."""
+        answer = self._input(
+            "Скопировать пароль в буфер обмена? [да/нет, по умолчанию нет]: "
+        )
+        if self._is_yes(answer):
+            if self.copy_to_clipboard(password):
+                print("Пароль скопирован в буфер обмена.")
+            else:
+                print(
+                    "Не удалось скопировать в буфер, пароль выведен выше.",
+                    file=sys.stderr,
+                )
 
     @staticmethod
     def copy_to_clipboard(text: str) -> bool:
@@ -354,10 +421,18 @@ class PasswordManager:
             return False
 
         if password is None:
-            password = getpass.getpass("Пароль: ")
-            if password != getpass.getpass("Повторите пароль: "):
-                print("Пароли не совпадают.", file=sys.stderr)
-                return False
+            answer = self._input(
+                "Сгенерировать пароль? [да/нет, по умолчанию да]: "
+            )
+            if self._is_yes(answer, default=True):
+                password = self._ask_password_generator().generate()
+                print(f"Сгенерированный пароль: {password}")
+                self._offer_copy(password)
+            else:
+                password = getpass.getpass("Пароль: ")
+                if password != getpass.getpass("Повторите пароль: "):
+                    print("Пароли не совпадают.", file=sys.stderr)
+                    return False
         if not password:
             print("Пароль не может быть пустым.", file=sys.stderr)
             return False
@@ -408,32 +483,15 @@ class PasswordManager:
 
     def generate_password_interactive(self) -> None:
         """Спросить параметры, сгенерировать пароль и предложить сохранить."""
-        raw_length = self._input(f"Длина пароля [{DEFAULT_LENGTH}]: ")
         try:
-            length = int(raw_length) if raw_length else DEFAULT_LENGTH
-        except ValueError:
-            print("Длина должна быть числом.", file=sys.stderr)
-            return
-
-        settings = {}
-        labels = {
-            "lowercase": "строчные буквы",
-            "uppercase": "заглавные буквы",
-            "digits": "цифры",
-            "special": "спецсимволы",
-        }
-        for key, label in labels.items():
-            answer = self._input(f"Использовать {label}? [да/нет, по умолчанию да]: ").lower()
-            settings[key] = answer not in ("нет", "no", "n")
-
-        try:
-            password = PasswordGenerator(length=length, **settings).generate()
+            password = self._ask_password_generator().generate()
         except ValueError as exc:
             print(f"Ошибка: {exc}", file=sys.stderr)
             return
 
         print(f"Новый пароль: {password}")
-        if self._input("Сохранить эту запись? [да/нет]: ").lower() in ("да", "yes", "y", "д"):
+        self._offer_copy(password)
+        if self._is_yes(self._input("Сохранить эту запись? [да/нет]: ")):
             title = self._input("Название/откуда: ")
             login = self._input("Логин: ")
             if self.db.add_password(title, login, self.encryption.encrypt(password)):
@@ -520,7 +578,10 @@ def build_parser() -> argparse.ArgumentParser:
     delete.add_argument("title")
 
     new = subparsers.add_parser("new", help="сгенерировать новый пароль")
-    new.add_argument("--length", type=int, default=DEFAULT_LENGTH, help="длина (по умолчанию 16)")
+    new.add_argument(
+        "--length", type=int, default=DEFAULT_LENGTH,
+        help=f"длина {MIN_LENGTH}-{MAX_LENGTH} (по умолчанию {DEFAULT_LENGTH})",
+    )
     new.add_argument("--no-lowercase", action="store_true", help="исключить строчные буквы")
     new.add_argument("--no-uppercase", action="store_true", help="исключить заглавные буквы")
     new.add_argument("--no-digits", action="store_true", help="исключить цифры")
